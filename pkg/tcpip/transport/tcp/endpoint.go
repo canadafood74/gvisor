@@ -602,6 +602,11 @@ type Endpoint struct {
 	//
 	// +checklocks:mu
 	pmtud tcpip.PMTUDStrategy
+
+	// bindToAny indicates if `any` address was used to bind a port with the endpoint.
+	//
+	// +checklocks:mu
+	bindToAny bool
 }
 
 // calculateAdvertisedMSS calculates the MSS to advertise.
@@ -1086,6 +1091,21 @@ func (e *Endpoint) closeLocked() {
 	// if we're connected, or stop accepting if we're listening.
 	e.shutdownLocked(tcpip.ShutdownWrite | tcpip.ShutdownRead)
 	e.closeNoShutdownLocked()
+
+	// Release the port for non-listening sockets and bound to `any` addr.
+	if e.isPortReserved && e.bindToAny {
+		portRes := ports.Reservation{
+			Networks:     e.effectiveNetProtos,
+			Transport:    ProtocolNumber,
+			Addr:         tcpip.Address{},
+			Port:         e.TransportEndpointInfo.ID.LocalPort,
+			Flags:        e.boundPortFlags,
+			BindToDevice: e.boundBindToDevice,
+			Dest:         e.boundDest,
+		}
+		e.stack.ReleasePort(portRes)
+		e.isPortReserved = false
+	}
 }
 
 // closeNoShutdown closes the endpoint without doing a full shutdown.
@@ -1204,10 +1224,14 @@ func (e *Endpoint) cleanupLocked() {
 	}
 
 	if e.isPortReserved {
+		addr := e.TransportEndpointInfo.ID.LocalAddress
+		if e.bindToAny {
+			addr = tcpip.Address{}
+		}
 		portRes := ports.Reservation{
 			Networks:     e.effectiveNetProtos,
 			Transport:    ProtocolNumber,
-			Addr:         e.TransportEndpointInfo.ID.LocalAddress,
+			Addr:         addr,
 			Port:         e.TransportEndpointInfo.ID.LocalPort,
 			Flags:        e.boundPortFlags,
 			BindToDevice: e.boundBindToDevice,
@@ -2458,7 +2482,12 @@ func (e *Endpoint) connect(addr tcpip.FullAddress, handshake bool) tcpip.Error {
 	r.Acquire()
 	e.route = r
 	e.boundNICID = nicID
-	e.effectiveNetProtos = []tcpip.NetworkProtocolNumber{netProto}
+	// effectiveNetProtos can be already set if bind was called by the tcp
+	// client before connect. Do not override the value during connect if
+	// it was already set.
+	if len(e.effectiveNetProtos) == 0 {
+		e.effectiveNetProtos = []tcpip.NetworkProtocolNumber{netProto}
+	}
 	e.connectingAddress = connectingAddr
 
 	e.initGSO()
@@ -2749,6 +2778,7 @@ func (e *Endpoint) bindLocked(addr tcpip.FullAddress) (err tcpip.Error) {
 		alsoBindToV4 := !e.ops.GetV6Only() && addr.Addr == tcpip.Address{} && stackHasV4
 		if alsoBindToV4 {
 			netProtos = append(netProtos, header.IPv4ProtocolNumber)
+			e.bindToAny = true
 		}
 	}
 

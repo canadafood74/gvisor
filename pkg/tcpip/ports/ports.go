@@ -436,6 +436,10 @@ func (pm *PortManager) ReleasePort(res Reservation) {
 }
 
 func (pm *PortManager) releasePortLocked(res Reservation) {
+	isAny := false
+	if res.Addr == anyIPAddress {
+		isAny = true
+	}
 	dst := res.dst()
 	for _, network := range res.Networks {
 		desc := portDescriptor{network, res.Transport, res.Port}
@@ -445,6 +449,11 @@ func (pm *PortManager) releasePortLocked(res Reservation) {
 		}
 		devToDest, ok := addrToDev[res.Addr]
 		if !ok {
+			// The endpoint was bound to any address, delete port
+			// reservations for all networks.
+			if isAny {
+				delete(pm.allocatedPorts, desc)
+			}
 			continue
 		}
 		destToCounter, ok := devToDest[res.BindToDevice]
